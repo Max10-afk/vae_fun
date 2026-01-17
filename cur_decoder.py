@@ -34,8 +34,6 @@ class decoder(Model):
                 data_format = "channels_last"
             )
 
-        self.geno_sum_layer = Dense2dLayer(3, 1, initializer = keras.initializers.GlorotNormal(),
-                                   activation = self.act_layer, name = "test")
         self.diff_to_z_att = tf.keras.layers.MultiHeadAttention(
             num_heads=1,
             key_dim=11,  # Match embedding dim
@@ -93,7 +91,7 @@ class decoder(Model):
         parent_genos = tf.squeeze(self.ini_conv(parent_genos, training = training))
         for cur_conv in self.gate_conv_layers:
             parent_genos = cur_conv(parent_genos)
-        parent_genos = tf.squeeze(self.geno_sum_layer(parent_genos))
+        # parent_genos = tf.squeeze(self.geno_sum_layer(parent_genos))
         return parent_genos
     
     def call(self, parents, embed_x, pos_data, training = False, return_activations = False):

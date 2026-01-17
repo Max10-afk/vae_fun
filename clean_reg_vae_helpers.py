@@ -22,22 +22,6 @@ def inverse_cantor_pairing_tf(z):
     x = w - y
     return tf.cast(x, dtype=tf.int32), tf.cast(y, dtype=tf.int32)
 
-
-def positional_encoding(position, d_model):
- 
-    # Create a matrix of shape [position, d_model] where each element is the position index
-    angle_rads = np.arange(position)[:, np.newaxis] / np.power(10000, (2 * (np.arange(d_model)[np.newaxis, :] // 2)) / np.float32(d_model))
-    
-    # Apply sine to even indices in the array; 2i
-    angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
-    
-    # Apply cosine to odd indices in the array; 2i+1
-    angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
-    
-    pos_encoding = angle_rads[np.newaxis, ...]
-    
-    return tf.cast(pos_encoding, dtype=tf.float32)
-
 @tf.function
 def embed_pop_distances(geno_pred, pop_map):
     # calculate pairwise distances between geno_preds of individuals of the same population
@@ -78,83 +62,86 @@ def embed_pop_distances(geno_pred, pop_map):
     mean_distance = tf.reduce_mean(mean_distances)
     return mean_distance / mean_shared_genos
 
-@tf.function
-def trait_pop_distances(trait_pred, pop_map):
-    # calculate pairwise distances between geno_preds of individuals of the same population
-    # and return the mean distance for each population using tensor operations
-    # Get the unique populations
-    unique_pops = tf.unique(pop_map)[0]
-    intra_pop = tf.expand_dims(trait_pred, axis=1) - tf.expand_dims(trait_pred, axis=0)
-    mask = tf.eye(tf.shape(trait_pred)[0], dtype=tf.bool)
-    intra_pop = tf.cast(tf.boolean_mask(intra_pop, ~mask), tf.float32)
-    # Calculate the pairwise intra_pop
-    mean_intra_pop = tf.reduce_mean(tf.math.abs(intra_pop))
-    # mean_intra_pop = tf.reduce_mean(intra_pop)
-    # Initialize a list to store the mean distances for each population
-    inter_pop_diff = tf.TensorArray(
-        dtype=tf.float32, size=0, dynamic_size=True
-    )
-    # Loop through each unique population
-    for pop in unique_pops:
-        # Get the indices of individuals in the current population
-        pop_indices = tf.where(pop_map == pop)[:, 0]
-        # Get the geno_preds for individuals in the current population
-        if len(pop_indices) < 2:
-            continue
-        pop_trait_pred = tf.gather(trait_pred, pop_indices)
-        # Calculate pairwise distances using broadcasting
-        trait_diff = tf.expand_dims(pop_trait_pred, axis=1) - tf.expand_dims(pop_trait_pred, axis=0)
-        # remove diagonal elements (self-trait_diff)
-        mask = tf.eye(tf.shape(pop_trait_pred)[0], dtype=tf.bool)
-        trait_diff = tf.cast(tf.boolean_mask(trait_diff, ~mask), tf.float32)
-        # Calculate the mean distance for the current population
-        mean_distance = tf.reduce_mean(tf.math.abs(trait_diff))
-        inter_pop_diff = inter_pop_diff.write(inter_pop_diff.size(), mean_distance)
-    # Convert the list of mean distances to a tensor
-    inter_pop_diff = inter_pop_diff.stack()
-    #inter_pop_diff = tf.stack(inter_pop_diff)
-    # Calculate the mean distance across all populations
-    mean_distance = tf.reduce_mean(inter_pop_diff)
-    return mean_distance / mean_intra_pop
+@tf.keras.utils.register_keras_serializable()
+class feature_drop_layer(tf.keras.layers.Layer):
+    def __init__(self, keep_prob=0.25, feature_dim=1, **kwargs):
+        super().__init__()
+        self.keep_prob = keep_prob
+        self.feature_dim = feature_dim
 
+    def call(self, inputs, training):
+        if training:
+            no_features = inputs.shape[self.feature_dim]
+            feature_keep_bool = tf.ones(no_features) + tf.floor(
+                tf.random.uniform([no_features]) - 0.25
+            )
+            reshape_dim = tf.concat(
+                [
+                    tf.ones(self.feature_dim, dtype=tf.int32),
+                    [no_features],
+                    tf.ones(tf.rank(inputs) - self.feature_dim - 1, dtype=tf.int32),
+                ],
+                axis=0,
+            )
+            feature_keep_bool = tf.reshape(feature_keep_bool, reshape_dim)
+            res = inputs * feature_keep_bool
+            return res
+        return inputs
 
-def inter_pop_rec(pred, truth, pop_map):
-    # calculate pairwise distances between embeddings of individuals of the same population
-    # and return the mean distance for each population using tensor operations
-    # Get the unique populations
-    unique_pops = tf.unique(pop_map)[0]
-    all_distances = loss_fn(tf.expand_dims(embed, axis=1), tf.expand_dims(embed, axis=0))
-    mask = tf.eye(tf.shape(all_distances)[0], dtype=tf.bool)
-    all_distances = tf.boolean_mask(all_distances, ~mask)
-    # Calculate the pairwise all_distances
-    all_distances = tf.norm(all_distances, axis=-1)
-    mean_all_distances = tf.reduce_mean(all_distances)
-    # Initialize a list to store the mean distances for each population
-    mean_distances = []
-    # Loop through each unique population
-    for pop in unique_pops:
-        # Get the indices of individuals in the current population
-        pop_indices = tf.where(pop_map == pop)[:, 0]
-        # Get the embeddings for individuals in the current population
-        if len(pop_indices) < 2:
-            continue
-        pop_embeddings = tf.gather(embed, pop_indices)
-        # Calculate pairwise distances using broadcasting
-        distances = loss_fn(tf.expand_dims(pop_embeddings, axis=1), tf.expand_dims(pop_embeddings, axis=0))
-        # remove diagonal elements (self-distances)
-        mask = tf.eye(tf.shape(pop_embeddings)[0], dtype=tf.bool)
-        distances = tf.boolean_mask(distances, ~mask)
-        # Calculate the pairwise distances
-        distances = tf.norm(distances, axis=-1)
-        # Calculate the mean distance for the current population
-        mean_distance = tf.reduce_mean(distances)
-        mean_distances.append(mean_distance)
-    # Convert the list of mean distances to a tensor
-    mean_distances = tf.stack(mean_distances)
-    # Calculate the mean distance across all populations
-    mean_distance = tf.reduce_mean(mean_distances)
-    return mean_distance / mean_all_distances
+def positional_encoding(position, d_model):
+ 
+    # Create a matrix of shape [position, d_model] where each element is the position index
+    angle_rads = np.arange(position)[:, np.newaxis] / np.power(10000, (2 * (np.arange(d_model)[np.newaxis, :] // 2)) / np.float32(d_model))
+    
+    # Apply sine to even indices in the array; 2i
+    angle_rads[:, 0::2] = np.sin(angle_rads[:, 0::2])
+    
+    # Apply cosine to odd indices in the array; 2i+1
+    angle_rads[:, 1::2] = np.cos(angle_rads[:, 1::2])
+    
+    pos_encoding = angle_rads[np.newaxis, ...]
+    
+    return tf.cast(pos_encoding, dtype=tf.float32)
 
+class PopWiseMean(tf.keras.metrics.Metric):
+    def __init__(self, num_pops, name="pop_mean", **kwargs):
+        super().__init__(name=name, **kwargs)
+        self.num_pops = num_pops
+        # Create state variables: one slot per population
+        # Shape: (num_pops,) initialized to 0
+        self.total = self.add_weight(name="total", shape=(num_pops,), initializer="zeros")
+        self.count = self.add_weight(name="count", shape=(num_pops,), initializer="zeros")
+
+    def update_state(self, values, pop_ids, sample_weight=None):
+        # values shape: (batch_size, ) or (batch_size, 1)
+        # pop_ids shape: (batch_size, )
+        
+        values = tf.cast(values, dtype=tf.float32)
+        values = tf.squeeze(values) # Ensure 1D
+        
+        # Since the population is the same for the whole batch, 
+        # we can just take the first ID and sum the values.
+        # (This is faster than processing per-sample)
+        batch_pop_id = tf.cast(pop_ids[0], dtype=tf.int32)
+        batch_sum = tf.reduce_sum(values)
+        batch_count = tf.cast(tf.shape(values)[0], dtype=tf.float32)
+
+        # Update the specific slot for this population
+        # We use scatter_nd_add to update only the index corresponding to batch_pop_id
+        indices = tf.expand_dims([batch_pop_id], axis=0) # Shape (1, 1)
+        
+        self.total.assign(tf.tensor_scatter_nd_add(self.total, indices, [batch_sum]))
+        self.count.assign(tf.tensor_scatter_nd_add(self.count, indices, [batch_count]))
+
+    def result(self):
+        # Returns a dict of { "pop_0": mean, "pop_1": mean, ... }
+        # Note: In standard Keras fit(), returning a dict here might be flattened 
+        # oddly in logs. Alternatively, return the tensor of means.
+        return tf.math.divide_no_nan(self.total, self.count)
+
+    def reset_state(self):
+        self.total.assign(tf.zeros(shape=(self.num_pops,)))
+        self.count.assign(tf.zeros(shape=(self.num_pops,)))
 
 def new_positional_encoding(positions, d_model):
     # Convert positions to a float32 tensor if not already
@@ -235,90 +222,6 @@ class elbo_loss(layers.Layer):
         # kl_div = -0.5 * tf.reduce_mean(1 + logvar - tf.square(mean - 1) - tf.exp(logvar), axis=-1)
         return kl_div_enc, kl_div_prior, reg_loss, rec_loss
 
-
-# Variance Importance Callback
-class VarImpVIANN(keras.callbacks.Callback):
-    def __init__(self, verbose=0):
-        self.verbose = verbose
-        self.n = 0
-        self.M2 = 0.0
-        self.w_shape = None
-
-    def on_train_begin(self, logs={}, verbose=1):
-        if self.verbose:
-            print("VIANN version 1.0 (Wellford + Mean) update per epoch")
-        self.w_shape = logs["w_shape"]
-        #   print("VarImpVIANN layer name ", self.model.layers[0].layers[0].name)
-        w = tf.reduce_sum(self.model.layers[0].get_weights()[0], axis=-1)
-        # print(self.model.layers[0].get_weights()[0].shape)
-        # print("Reduced sum weights shape: ", w.shape)
-        # print("target reshaped weights shape: ", self.w_shape)
-        w = tf.reshape(w, self.w_shape)
-        # print("Reshaped weights shape: ", w.shape)
-        self.diff = tf.reduce_sum(w, axis=-1)
-        # print("Initial diff shape: ", self.diff.shape)
-
-    def on_epoch_end(self, batch, logs={}):
-        # Sum over dense layer feature axis -> obtain summed weights per flattened input feature
-        w = tf.reduce_sum(self.model.layers[0].get_weights()[0], axis=-1)
-        # print("on_epoch_end Reduced sum weights shape: ", w.shape)
-        # print("on_epoch_end target reshaped weights shape: ", self.w_shape)
-        # reshape w to reconstruct weight per snp feature
-        w = tf.reshape(w, self.w_shape)
-        # sum over snp one hot encoding dimension and parental dimension
-        w = tf.reduce_sum(w, axis=-1)
-        self.n += 1
-        delta = np.subtract(w, self.diff)
-        self.diff += delta / self.n
-        delta2 = np.subtract(w, self.diff)
-        self.M2 += delta * delta2
-
-        self.lastweights = w
-
-    def on_train_end(self, batch, logs={}):
-        if self.n < 2:
-            self.s2 = float("nan")
-        else:
-            self.s2 = self.M2 / (self.n - 1)
-
-        scores = np.multiply(self.s2, np.abs(self.lastweights))
-        print(f"Final variable importance scores shape: {scores.shape}")
-
-        self.varScores = (scores - min(scores)) / (max(scores) - min(scores))
-        if self.verbose:
-            print(
-                "Most important variables: ",
-                np.array(self.varScores).argsort()[-10:][::-1],
-            )
-
-
-@tf.keras.utils.register_keras_serializable()
-class feature_drop_layer(tf.keras.layers.Layer):
-    def __init__(self, keep_prob=0.25, feature_dim=1, **kwargs):
-        super().__init__()
-        self.keep_prob = keep_prob
-        self.feature_dim = feature_dim
-
-    def call(self, inputs, training):
-        if training:
-            no_features = inputs.shape[self.feature_dim]
-            feature_keep_bool = tf.ones(no_features) + tf.floor(
-                tf.random.uniform([no_features]) - 0.25
-            )
-            reshape_dim = tf.concat(
-                [
-                    tf.ones(self.feature_dim, dtype=tf.int32),
-                    [no_features],
-                    tf.ones(tf.rank(inputs) - self.feature_dim - 1, dtype=tf.int32),
-                ],
-                axis=0,
-            )
-            feature_keep_bool = tf.reshape(feature_keep_bool, reshape_dim)
-            res = inputs * feature_keep_bool
-            return res
-        return inputs
-
-
 ## General Helper functions
 def train_loop(
     model,
@@ -386,12 +289,12 @@ def train_loop(
             model.metrics[cur_id].name: model.metrics[cur_id].result()
             for cur_id in range(len(model.metrics))
         }
-        train_log = {
-            cur_metric: np.append(
-                train_log[cur_metric], train_metrics[cur_metric].numpy()
-            )
-            for cur_metric in train_log.keys()
-        }
+        # train_log = {
+        #     cur_metric: np.append(
+        #         train_log[cur_metric], train_metrics[cur_metric].numpy()
+        #     )
+        #     for cur_metric in train_log.keys()
+        # }
         # Reset the states of the metrics for validation
         model.reset_metrics()
 
@@ -407,20 +310,40 @@ def train_loop(
             model.metrics[cur_id].name: model.metrics[cur_id].result()
             for cur_id in range(len(model.metrics))
         }
-        val_log = {
-            cur_metric: np.append(
-                val_log[cur_metric], val_metrics[cur_metric.replace("val_", "")].numpy()
-            )
-            for cur_metric in val_log.keys()
-        }
+        # val_log = {
+        #     cur_metric: np.append(
+        #         val_log[cur_metric], val_metrics[cur_metric.replace("val_", "")].numpy()
+        #     )
+        #     for cur_metric in val_log.keys()
+        # }
         # Print collected mean metrics
         print(f"Epoch {epoch+1} train metrics:")
+        # train_log =  {cur_metric.name: np.empty(shape=(1)) for cur_metric in model.metrics}
+        # val_log =  {cur_metric.name: np.empty(shape=(1)) for cur_metric in model.metrics}
         for cur_metric_name in train_metrics.keys():
-            print(f"{cur_metric_name}: {train_metrics[cur_metric_name]}", end=", ")
+            metric_vals = train_metrics[cur_metric_name].numpy()
+            if isinstance(metric_vals, (list, np.ndarray)) and len(metric_vals) > 1:
+                metric_names = [f"{cur_metric_name}_{i}" for i in range(len(metric_vals))]
+                res_metric = dict(zip(metric_names, metric_vals))
+                train_log.update(res_metric)
+                print_str = ", ".join([f"{name}: {value}" for name, value in res_metric.items()])
+                print(print_str)
+            else:
+                train_log[cur_metric_name] = train_metrics[cur_metric_name].numpy()
+                print(f"{cur_metric_name}: {train_metrics[cur_metric_name]}", end=", ")
         print("")
         print(f"Epoch {epoch+1} val metrics:")
         for cur_metric_name in val_metrics.keys():
-            print(f"{cur_metric_name}: {val_metrics[cur_metric_name]}", end=", ")
+            metric_vals = val_metrics[cur_metric_name].numpy()
+            if isinstance(metric_vals, (list, np.ndarray)) and len(metric_vals) > 1:
+                metric_names = [f"{cur_metric_name}_{i}" for i in range(len(metric_vals))]
+                res_metric = dict(zip(metric_names, metric_vals))
+                val_log.update(res_metric)
+                print_str = ", ".join([f"{name}: {value}" for name, value in res_metric.items()])
+                print(print_str)
+            else:
+                val_log[cur_metric_name] = val_metrics[cur_metric_name].numpy()
+                print(f"{cur_metric_name}: {val_metrics[cur_metric_name]}", end=", ")
         if (epoch % 100) == 0:
             tf.keras.backend.clear_session()
             gc.collect()
@@ -528,6 +451,7 @@ def plot_train_val_metrics(
         "trait_diff",
     ]
     class_acc_metrics = [f"{i}_acc" for i in range(num_classes)]
+
 
     num_general_metrics = len(general_metrics)
 
